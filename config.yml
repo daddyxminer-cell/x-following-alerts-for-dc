@@ -16,8 +16,8 @@ accounts:
 # Every visible page is read; an incomplete scan leaves the baseline unchanged.
 # Budget includes one final empty page; raise carefully for longer lists.
 page_size: 100
-max_pages_per_run: 80
+max_pages_per_run: 100
 # Per account; excess alerts stay queued for later runs, never discarded.
 max_notifications_per_run: 50
 # First check saves a baseline, not an alert for every existing relationship.
-announce_new_watch: true
+announce_new_watch: false
