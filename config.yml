@@ -5,7 +5,7 @@ watch_mode: following
 # Select one or more accounts. WATCH_ACCOUNTS repository variable overrides this list.
 # @elon and @elonmusk are DIFFERENT accounts; use the exact handle you mean.
 accounts:
-  - elon
+  - 100XInsight
   # - nasa
   # - SpaceX
   # - elonmusk
