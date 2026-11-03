@@ -1,0 +1,4 @@
+requests>=2.32.4,<3
+PyYAML>=6.0.2,<7
+# Free, unofficial cookie-based reader; reviewed pagination API. No paid X API.
+twifork==2.4.0
