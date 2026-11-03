@@ -5,18 +5,8 @@ watch_mode: following
 # Select one or more accounts. WATCH_ACCOUNTS repository variable overrides this list.
 # @elon and @elonmusk are DIFFERENT accounts; use the exact handle you mean.
 accounts:
-  - 100XInsight
-  # - nasa
-  # - SpaceX
-  # - elonmusk
-  # - username: nasa
-  #   enabled: false
-  #   webhook_env: DISCORD_WEBHOOK_NASA  # map this secret in the workflow too
-
-# Every visible page is read; an incomplete scan leaves the baseline unchanged.
-# Budget includes one final empty page; raise carefully for longer lists.
-page_size: 100
-max_pages_per_run: 100
+  - username: 100XInsight
+    max_pages_per_run: 100
 # Per account; excess alerts stay queued for later runs, never discarded.
 max_notifications_per_run: 50
 # First check saves a baseline, not an alert for every existing relationship.
