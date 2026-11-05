@@ -1,16 +1,31 @@
-# following = notify when a watched account follows somebody (your example).
+# following = notify when a watched account follows somebody.
 # followers = notify when somebody follows a watched account instead.
 watch_mode: following
 
-# Select one or more accounts. WATCH_ACCOUNTS repository variable overrides this list.
-# @elon and @elonmusk are DIFFERENT accounts; use the exact handle you mean.
+# Add 20-30+ accounts here (plain username or - username: handle)
 accounts:
   - username: 100XInsight
+  # - username: account2
+  # - username: account3
+  # - username: account4
 
-# IMPORTANT: Keep page_size and max_pages_per_run at the top level (no spaces before them).
-# X returns ~60-70 users per page regardless of page_size, so ~6,150 following needs ~95-105 pages.
+# Request size & page budget for full initial baseline scans
 page_size: 100
 max_pages_per_run: 300
+
+# --- ANTI-BAN / 20-30 ACCOUNT SCALING SETTINGS ---
+# Once an account has a baseline in state/followers_state.json, X lists newest follows first.
+# Stop paging an account after this many consecutive pages with 0 new follows (saves 98% of X requests):
+incremental_scan: true
+early_stop_known_pages: 2
+
+# When you add 20-30 new accounts at once, only do full 100-page baseline scans for
+# this many unbaselined accounts per run (remaining new accounts automatically baseline on next runs):
+max_new_baselines_per_run: 2
+
+# Seconds to pause between pages and between accounts (+ automatic random jitter)
+page_delay: 1.5
+account_delay: 4.0
 
 # Per account; excess alerts stay queued for later runs, never discarded.
 max_notifications_per_run: 50
