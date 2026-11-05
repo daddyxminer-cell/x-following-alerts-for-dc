@@ -5,6 +5,8 @@ watch_mode: following
 # Add 20-30+ accounts here (plain username or - username: handle)
 accounts:
   - username: 100XInsight
+  - username: notncssry
+  - username: BassManTV
   # - username: account2
   # - username: account3
   # - username: account4
