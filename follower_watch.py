@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -35,6 +36,7 @@ class AccountConfig:
     username: str
     enabled: bool = True
     webhook_env: str | None = None
+    max_pages_per_run: int | None = None
 
 
 @dataclass
@@ -42,9 +44,14 @@ class Settings:
     accounts: list[AccountConfig] = field(default_factory=list)
     watch_mode: str = "following"
     page_size: int = 100
-    max_pages_per_run: int = 20
+    max_pages_per_run: int = 300
     max_notifications_per_run: int = 50
     announce_new_watch: bool = True
+    incremental_scan: bool = False
+    early_stop_known_pages: int = 2
+    max_new_baselines_per_run: int = 1000
+    page_delay: float = 1.0
+    account_delay: float = 3.0
 
 
 def normalise_username(value: str) -> str:
@@ -68,16 +75,27 @@ def load_settings(path: str | Path, env_accounts: str | None = None) -> Settings
     settings.watch_mode = raw.get("watch_mode", settings.watch_mode)
     if settings.watch_mode not in {"following", "followers"}:
         raise ValueError("watch_mode must be following or followers")
-    for name, maximum in (("page_size", 100), ("max_pages_per_run", 10000),
-                          ("max_notifications_per_run", 1000)):
+    for name, maximum in (
+        ("page_size", 100),
+        ("max_pages_per_run", 10000),
+        ("max_notifications_per_run", 1000),
+        ("early_stop_known_pages", 100),
+        ("max_new_baselines_per_run", 1000),
+    ):
         value = raw.get(name, getattr(settings, name))
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{name} must be an integer between 1 and {maximum}")
         setattr(settings, name, value)
-    announce = raw.get("announce_new_watch", True)
-    if not isinstance(announce, bool):
-        raise ValueError("announce_new_watch must be true or false")
-    settings.announce_new_watch = announce
+    for bool_name in ("announce_new_watch", "incremental_scan"):
+        val = raw.get(bool_name, getattr(settings, bool_name))
+        if not isinstance(val, bool):
+            raise ValueError(f"{bool_name} must be true or false")
+        setattr(settings, bool_name, val)
+    for float_name in ("page_delay", "account_delay"):
+        val = raw.get(float_name, getattr(settings, float_name))
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not 0 <= float(val) <= 60:
+            raise ValueError(f"{float_name} must be a number between 0 and 60")
+        setattr(settings, float_name, float(val))
     entries = raw.get("accounts", [])
     if env_accounts and env_accounts.strip():
         entries = [s.strip() for s in re.split(r"[,\n]", env_accounts) if s.strip()]
@@ -92,13 +110,16 @@ def load_settings(path: str | Path, env_accounts: str | None = None) -> Settings
         name = normalise_username(entry["username"])
         enabled = entry.get("enabled", True)
         webhook_env = entry.get("webhook_env")
+        max_pages = entry.get("max_pages_per_run")
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be true or false")
         if webhook_env is not None and (not isinstance(webhook_env, str) or
                                        not re.fullmatch(r"[A-Z_][A-Z0-9_]*", webhook_env)):
             raise ValueError("webhook_env must be an environment variable name")
+        if max_pages is not None and (type(max_pages) is not int or not 1 <= max_pages <= 10000):
+            raise ValueError("max_pages_per_run must be an integer between 1 and 10000")
         if name.lower() not in seen:
-            settings.accounts.append(AccountConfig(name, enabled, webhook_env))
+            settings.accounts.append(AccountConfig(name, enabled, webhook_env, max_pages))
             seen.add(name.lower())
     return settings
 
@@ -111,7 +132,6 @@ def load_state(path: str | Path) -> dict[str, Any]:
         state = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(state, dict) or not isinstance(state.get("accounts"), dict):
             raise ValueError("Invalid state structure")
-        # The earlier follower-only draft used incomplete lists. Never reuse those.
         if "version" not in state:
             print("Legacy state detected; creating new complete baselines.")
             return {"version": 2, "accounts": {}}
@@ -181,12 +201,8 @@ def validate_timeline(body: Any) -> None:
 
 
 class XSource:
-    """Read-only twifork adapter: browser cookies, no paid API or proxy service.
-
-    Result.next() is essential: passing raw cursors skips buffered users. Tokens
-    exposed to the snapshot reader are local page IDs, never authentication data.
-    """
-    def __init__(self, cookies: dict[str, str], client=None, page_delay=1):
+    """Read-only twifork adapter: browser cookies, no paid API or proxy service."""
+    def __init__(self, cookies: dict[str, str], client=None, page_delay: float = 1.0):
         from twikit import Client
         self.client = client or Client("en-US", timeout=30)
         self.client.set_cookies(cookies)
@@ -196,8 +212,6 @@ class XSource:
         self._token = None
         self._sequence = 0
         self._signatures = set()
-        # Inspect raw timeline shape before the library parses it. Pinning the
-        # dependency makes this adapter's small internal integration testable.
         if client is None:
             for name in ("following", "followers"):
                 original = getattr(self.client.gql, name)
@@ -213,14 +227,11 @@ class XSource:
         import warnings
         try:
             with warnings.catch_warnings():
-                # Quality-filter warnings mean the library skipped user records.
                 warnings.filterwarnings("error", category=UserWarning, module=r"twikit\..*")
                 return self.loop.run_until_complete(factory())
         except SourceError:
             raise
         except Exception as exc:
-            # Exception bodies can contain URLs, headers or cookies. Log only
-            # allowlisted error categories and actionable instructions.
             kind = type(exc).__name__
             if kind in {"InvalidSession", "Unauthorized", "AccountLocked", "AccountSuspended"}:
                 raise SessionError("X login needs attention: sign in manually and refresh the cookie secrets") from None
@@ -263,7 +274,9 @@ class XSource:
         else:
             if token != self._token or self._page is None:
                 raise SourceError("Invalid local pagination token")
-            time.sleep(self.page_delay)
+            if self.page_delay > 0:
+                jitter = random.uniform(0.0, 0.35 * self.page_delay)
+                time.sleep(self.page_delay + jitter)
             page = self._run(self._page.next)
         users = [self.user_dict(u) for u in page]
         meta = {"result_count": len(users)}
@@ -297,12 +310,23 @@ def validate_user(user: Any) -> None:
         raise SourceError("X returned an invalid user record")
 
 
-def fetch_snapshot(source, user_id: str, settings: Settings) -> dict[str, dict]:
-    """Read every page; ordering is NOT assumed and partial scans are never saved."""
+def fetch_snapshot(
+    source,
+    user_id: str,
+    settings: Settings,
+    known_ids: set[str] | None = None,
+    max_pages: int | None = None,
+) -> dict[str, dict]:
+    """Read pages. If incremental_scan is enabled and known_ids exists, stop early once
+    early_stop_known_pages consecutive pages contain only known IDs."""
     users = {}
     token = None
     tokens = set()
-    for _ in range(settings.max_pages_per_run):
+    budget = max_pages if max_pages is not None else settings.max_pages_per_run
+    consecutive_known_pages = 0
+    use_incremental = bool(settings.incremental_scan and known_ids)
+
+    for _ in range(budget):
         body = source.get_page(user_id, settings.watch_mode, settings.page_size, token)
         meta = body.get("meta")
         data = body.get("data", [])
@@ -310,12 +334,23 @@ def fetch_snapshot(source, user_id: str, settings: Settings) -> dict[str, dict]:
                 type(meta.get("result_count")) is not int or
                 not isinstance(data, list) or meta["result_count"] != len(data)):
             raise SourceError("Incomplete X response; snapshot unchanged")
+        new_on_page = 0
         for user in data:
             validate_user(user)
-            users[user["id"]] = user
+            uid = user["id"]
+            users[uid] = user
+            if use_incremental and uid not in known_ids:
+                new_on_page += 1
         token = meta.get("next_token")
         if not token:
             return users
+        if use_incremental and data:
+            if new_on_page == 0:
+                consecutive_known_pages += 1
+                if consecutive_known_pages >= settings.early_stop_known_pages:
+                    return users
+            else:
+                consecutive_known_pages = 0
         if not isinstance(token, str) or token in tokens:
             raise SourceError("Repeated or invalid pagination token; snapshot unchanged")
         tokens.add(token)
@@ -333,13 +368,11 @@ class DiscordNotifier:
         if self.dry_run:
             print("[DRY RUN] " + json.dumps(payload, ensure_ascii=True))
             return
-        # wait=true asks Discord to acknowledge message creation.
         for attempt in range(4):
             try:
                 response = self.session.post(webhook, params={"wait": "true"},
                                              json=payload, timeout=30)
             except requests.RequestException:
-                # Do not log exceptions containing the secret webhook URL.
                 raise RuntimeError("Discord network request failed; delivery remains pending") from None
             if response.status_code == 429 and attempt < 3:
                 try:
@@ -393,7 +426,6 @@ def resolve_webhook(account: AccountConfig, dry_run: bool) -> str:
 
 def process_account(account, settings, state, source, notifier, webhook, checkpoint=lambda: None):
     watched = source.get_user(account.username)
-    # IDs survive handle changes; modes can never contaminate one another's baseline.
     key = f"{settings.watch_mode}:{watched['id']}"
     previous = state["accounts"].get(key)
     sent = 0
@@ -407,9 +439,9 @@ def process_account(account, settings, state, source, notifier, webhook, checkpo
             checkpoint()
 
     if previous:
-        # Retry outstanding deliveries even when the subsequent X list fetch fails.
         drain(previous)
-    current = fetch_snapshot(source, watched["id"], settings)
+    known_ids = set(previous["ids"]) if previous else None
+    current = fetch_snapshot(source, watched["id"], settings, known_ids, account.max_pages_per_run)
     expected = watched.get("following_count" if settings.watch_mode == "following" else "followers_count")
     if not current and isinstance(expected, int) and expected > 0:
         raise SourceError("X returned an empty list despite a nonzero profile count; snapshot unchanged")
@@ -422,12 +454,15 @@ def process_account(account, settings, state, source, notifier, webhook, checkpo
             })
         state["accounts"][key] = {"ids": sorted(current), "pending": []}
         checkpoint()
+        print(f"@{watched['username']}: baseline saved ({len(current)} accounts)")
         return 0
-    additions = sorted(set(current) - set(previous["ids"]))
+    additions = sorted(set(current) - known_ids)
     previous["pending"].extend(build_embed(current[uid], watched, settings.watch_mode)
                                for uid in additions)
-    previous["ids"] = sorted(current)
-    # Persist the queue before sending. A failed post must never consume an event.
+    if settings.incremental_scan:
+        previous["ids"] = sorted(known_ids | set(current))
+    else:
+        previous["ids"] = sorted(current)
     checkpoint()
     drain(previous)
     print(f"@{watched['username']}: {len(additions)} additions; {len(previous['pending'])} pending")
@@ -445,11 +480,12 @@ def main() -> int:
         dry_run = os.getenv("DRY_RUN", "").lower() in {"true", "1", "yes"}
         notifier = DiscordNotifier(dry_run)
         webhooks = [resolve_webhook(a, dry_run) for a in accounts]
-        source = XSource(load_cookies_from_env())
+        source = XSource(load_cookies_from_env(), page_delay=settings.page_delay)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         print(f"Configuration error: {exc}")
         return 1
     failures = 0
+    new_baselines_this_run = 0
 
     def checkpoint():
         if not dry_run:
@@ -457,10 +493,19 @@ def main() -> int:
 
     try:
         for index, (account, webhook) in enumerate(zip(accounts, webhooks)):
-            if index:
-                time.sleep(3)
+            if index and settings.account_delay > 0:
+                time.sleep(settings.account_delay + random.uniform(0.0, 1.5))
             try:
+                # Check if this account already has a baseline; if not, respect max_new_baselines_per_run
+                watched = source.get_user(account.username)
+                key = f"{settings.watch_mode}:{watched['id']}"
+                is_new_baseline = key not in state["accounts"]
+                if is_new_baseline and new_baselines_this_run >= settings.max_new_baselines_per_run:
+                    print(f"@{account.username}: queued for baseline on next run (max_new_baselines_per_run={settings.max_new_baselines_per_run} reached)")
+                    continue
                 process_account(account, settings, state, source, notifier, webhook, checkpoint)
+                if is_new_baseline:
+                    new_baselines_this_run += 1
             except (SessionError, RateLimited) as exc:
                 print(f"Check stopped: {exc}")
                 failures += 1
