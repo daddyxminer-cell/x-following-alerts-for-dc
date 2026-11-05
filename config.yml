@@ -6,7 +6,12 @@ watch_mode: following
 # @elon and @elonmusk are DIFFERENT accounts; use the exact handle you mean.
 accounts:
   - username: 100XInsight
-    max_pages_per_run: 100
+
+# IMPORTANT: Keep page_size and max_pages_per_run at the top level (no spaces before them).
+# X returns ~60-70 users per page regardless of page_size, so ~6,150 following needs ~95-105 pages.
+page_size: 100
+max_pages_per_run: 300
+
 # Per account; excess alerts stay queued for later runs, never discarded.
 max_notifications_per_run: 50
 # First check saves a baseline, not an alert for every existing relationship.
